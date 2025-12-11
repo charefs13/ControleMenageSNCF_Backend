@@ -7,6 +7,7 @@
 generator client {
   provider = "prisma-client"
   output   = "../generated/prisma"
+  moduleFormat = "commonjs"
 }
 
 datasource db {
@@ -35,7 +36,7 @@ model Utilisateur {
   dateCreation      DateTime     @default(now())
   accepteConditions Boolean        @default(false)
   Formulaire        Formulaire[]
-  inscriptionToken  String?
+  authToken  String?
 }
 
 enum Role {
