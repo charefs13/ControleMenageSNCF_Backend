@@ -27,7 +27,7 @@ export class AuthService {
     private usersService: UsersService,  // Accès aux données des utilisateurs
     private jwtService: JwtService,      // Gestion JWT (signature, vérification)
     private prisma: PrismaService,       // Accès direct à Prisma si nécessaire
-  ) {}
+  ) { }
 
   /**
    * Vérifie l'identité d’un utilisateur et retourne un token JWT si valide.
@@ -47,24 +47,28 @@ export class AuthService {
     }
 
     // Récupération de l'utilisateur
-    const user = await this.usersService.findOne(cp);
-    if (!user || !user.mdp) {
-      throw new UnauthorizedException('CP ou mot de passe invalide');
+    const userExist = await this.usersService.findOne(cp);
+    if (!userExist) {
+      throw new UnauthorizedException('Utilisateur non trouvé, vérifiez votre habilitation auprès de votre référent');
+    } else if (userExist && !userExist.mdp) {
+      throw new UnauthorizedException('Mot de passe invalide');
+    }
+    if (userExist.mdp) {
+      // Vérifie le mot de passe en comparant le hash
+      const passwordMatches = await bcrypt.compare(password, userExist.mdp);
+      if (!passwordMatches) {
+        throw new UnauthorizedException('Mot de passe invalide');
+      }
     }
 
-    // Vérifie le mot de passe en comparant le hash
-    const passwordMatches = await bcrypt.compare(password, user.mdp);
-    if (!passwordMatches) {
-      throw new UnauthorizedException('CP ou mot de passe invalide');
-    }
-
+    // Réinitialisation du token d'authentification stocké (sécurité)
     await this.prisma.utilisateur.update({
       where: { cp },
       data: { authToken: null },
     });
 
     // Génération du token JWT
-    return this.getToken(user);
+    return this.getToken(userExist);
   }
 
   /**
@@ -95,7 +99,7 @@ export class AuthService {
 
   /**
    * Génère un token pour un utilisateur donné.
-   * Utilisé principalement pour des liens uniques (inscription, reset password).
+   * Utilisé principalement pour des liens uniques (reset password).
    *
    * @param cp Code personnel
    * @returns { token }
