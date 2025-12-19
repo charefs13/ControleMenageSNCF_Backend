@@ -10,7 +10,7 @@ import { UsersService } from '../users/users.service.js';
 import { JwtService } from '@nestjs/jwt';
 import * as bcrypt from 'bcrypt';
 import { PrismaService } from '../prisma/prisma.service';
-import { Utilisateur } from '../../generated/prisma/client';
+import { Role, Utilisateur } from '../../generated/prisma/client';
 import { MailService } from '../mail/mail.service.js';
 
 /**
@@ -27,53 +27,11 @@ export class AuthService {
   constructor(
     private usersService: UsersService,  // Accès aux données des utilisateurs
     private jwtService: JwtService,      // Gestion JWT (signature, vérification)
-    private prisma: PrismaService,  
+    private prisma: PrismaService,
     private mailService: MailService,     // Accès direct à Prisma si nécessaire
   ) { }
 
-  /**
-   * Vérifie l'identité d’un utilisateur et retourne un token JWT si valide.
-   *
-   * Étapes :
-   * 1. Vérifier la présence du CP et du mot de passe
-   * 2. Vérifier que l'utilisateur existe
-   * 3. Comparer le mot de passe en clair avec le hash stocké
-   * 4. Générer un JWT si tout est valide
-   *
-   * @param cp Code personnel
-   * @param password Mot de passe en clair
-   */
-  async login(cp: string, password: string) {
-    if (!cp || !password) {
-      throw new BadRequestException('CP et mot de passe requis');
-    }
-
-    // Récupération de l'utilisateur
-    const userExist = await this.usersService.findOne(cp);
-    if (!userExist) {
-      throw new UnauthorizedException('Utilisateur non trouvé, vérifiez votre habilitation auprès de votre référent');
-    } else if (userExist && !userExist.mdp) {
-      throw new UnauthorizedException('Mot de passe invalide');
-    }
-    if (userExist.mdp) {
-      // Vérifie le mot de passe en comparant le hash
-      const passwordMatches = await bcrypt.compare(password, userExist.mdp);
-      if (!passwordMatches) {
-        throw new UnauthorizedException('Mot de passe invalide');
-      }
-    }
-
-    // Réinitialisation du token d'authentification stocké (sécurité)
-    await this.prisma.utilisateur.update({
-      where: { cp },
-      data: { authToken: null },
-    });
-
-    // Génération du token JWT
-    return this.getToken(userExist);
-  }
-
-  /**
+   /**
    * Génère un token JWT avec les informations essentielles de l'utilisateur.
    *
    * Le payload contient :
@@ -98,6 +56,52 @@ export class AuthService {
 
     return { accessToken };
   }
+  
+/** login
+ * Vérifie l'identité d’un utilisateur et retourne un token JWT si valide.
+ * @param cp Code personnel
+ * @param password Mot de passe en clair
+ */
+async login(cp: string, password: string) {
+  if (!cp || !password) {
+    throw new BadRequestException('CP et mot de passe requis');
+  }
+
+  // Récupération de l'utilisateur
+  const userExist = await this.usersService.findOne(cp);
+  if (!userExist) {
+    throw new UnauthorizedException(
+      'Utilisateur non trouvé, vérifiez votre habilitation auprès de votre référent',
+    );
+  } else if (userExist && !userExist.mdp) {
+    throw new UnauthorizedException('Mot de passe invalide');
+  }
+
+  if (userExist.mdp) {
+    // Vérifie le mot de passe en comparant le hash
+    const passwordMatches = await bcrypt.compare(password, userExist.mdp);
+    if (!passwordMatches) {
+      throw new UnauthorizedException('Mot de passe invalide');
+    }
+  }
+
+  // Réinitialisation du token d'authentification stocké (sécurité)
+  await this.prisma.utilisateur.update({
+    where: { cp },
+    data: { authToken: null },
+  });
+
+  const token = await this.getToken(userExist);
+
+  // Génération du token JWT
+  return {
+    accessToken: token.accessToken,
+    acceptedTerms: userExist.accepteConditions,
+  };
+}
+
+
+ 
 
   /**
    * Génère un token pour un utilisateur donné.
@@ -148,20 +152,39 @@ export class AuthService {
    * @param cp Code personnel de l’utilisateur
    * @param newPassword Nouveau mot de passe
    */
-  async updatePassword(cp: string, newPassword: string) {
-    if (!newPassword) {
-      throw new BadRequestException('Nouveau mot de passe requis');
-    }
-
-    // Hash du mot de passe avant stockage
-    const hashedPassword = await bcrypt.hash(newPassword, 10);
-
-    // Mise à jour sécurisée du mot de passe en base
-    await this.prisma.utilisateur.update({
-      where: { cp },
-      data: { mdp: hashedPassword },
-    });
+  async updatePassword(token: string, newPassword: string) {
+  if (!token || !newPassword) {
+    throw new BadRequestException('Nouveau mot de passe requis');
   }
+
+  let payload: { sub: string; email: string; role: Role };
+  try {
+    payload = this.verifyToken(token) as { sub: string; email: string; role: Role };
+  } catch {
+    throw new UnauthorizedException('Token invalide ou expiré');
+  }
+
+  // Vérifie que l'utilisateur existe et que le token correspond
+  const user = await this.usersService.findOne(payload.sub);
+  if (!user || user.authToken !== token) {
+    throw new UnauthorizedException('Token invalide ou déjà utilisé');
+  }
+
+  // Hash du nouveau mot de passe
+  const hashedPassword = await bcrypt.hash(newPassword, 10);
+
+  // Mise à jour sécurisée du mot de passe en base
+  await this.prisma.utilisateur.update({
+    where: { cp: payload.sub },
+    data: {
+      mdp: hashedPassword,
+      authToken: null, // Invalide le token après utilisation
+    },
+  });
+
+  return { message: 'Mot de passe mis à jour' };
+}
+
 
   /**
    * Vérifie un token JWT.
@@ -190,17 +213,26 @@ export class AuthService {
     }
 
     // Génère un token pour l'utilisateur et le stocke en base, cette fonction retourne token
-  const {token} = await this.generateTokenForUser(user.cp)
+    const { token } = await this.generateTokenForUser(user.cp)
 
 
     // Crée le lien complet pour le frontend
     const resetLink = `${process.env.FRONTEND_URL}/update-password/?cp=${user.cp}&token=${token}`;
 
     // Envoie l'email (voir étape suivante)
-await this.mailService.sendResetPasswordEmail(user.email, resetLink);
+    await this.mailService.sendResetPasswordEmail(user.email, resetLink);
 
     return { message: 'Email de réinitialisation envoyé' };
   }
 
+  // Accepte les conditions d'utilisation première connection
+  async acceptTerms(cp: string) {
+    if (!cp) throw new BadRequestException('Utilisateur invalide');
+
+    await this.prisma.utilisateur.update({
+      where: { cp },
+      data: { accepteConditions: true },
+    });
+  }
 
 }

@@ -1,206 +1,237 @@
-// // src/auth/auth.controller.ts
-// import { Controller, Post, Patch, Body, Param, Headers, NotFoundException, BadRequestException, UnauthorizedException } from '@nestjs/common';
-// import { AuthService } from './auth.service.js';
-// import { LoginDto } from './dto/login.dto.js';
-// import { ApiTags, ApiOkResponse, ApiBadRequestResponse, ApiOperation } from '@nestjs/swagger';
-
-// /**
-//  * Classe représentant la réponse des tokens pour Swagger
-//  */
-// class TokensResponse {
-//   accessToken: string;
-//   refreshToken?: string; // Pour l'instant, seul accessToken est utilisé
-// }
-
-// @ApiTags('auth') // Regroupe toutes les routes sous "auth" dans Swagger
-// @Controller('auth')
-// export class AuthController {
-//   constructor(private authService: AuthService) {}
-
-//   /**
-//    * Connexion d'un utilisateur.
-//    * Vérifie CP et mot de passe.
-//    * Retourne un JWT si connexion réussie.
-//    */
-//   @Post('login')
-//   @ApiOperation({ summary: 'Connexion utilisateur et récupération du token' })
-//   @ApiOkResponse({ description: 'Connexion réussie, retourne access token.', type: TokensResponse })
-//   @ApiBadRequestResponse({ description: 'CP ou mot de passe invalide.' })
-//   async login(@Body() dto: LoginDto) {
-//     if (!dto.cp || !dto.mdp) throw new BadRequestException('CP et mot de passe requis');
-//     return this.authService.login(dto.cp, dto.mdp);
-//   }
-
-//   /**
-//    * Génère un token pour un utilisateur donné et le stocke en base.
-//    * @param cp Code personnel (identifiant) de l'utilisateur
-//    */
-//   @Post('token/:cp')
-//   @ApiOperation({ summary: 'Génération d’un token pour un utilisateur' })
-//   async generateToken(@Param('cp') cp: string) {
-//     if (!cp) throw new BadRequestException('CP requis');
-//     const token = await this.authService.generateTokenForUser(cp);
-//     if (!token) throw new NotFoundException('Utilisateur non trouvé'); // Retour 404 si utilisateur inexistant
-//     return token;
-//   }
-
-//   /**
-//    * Mise à jour du mot de passe d’un utilisateur.
-//    * Le mot de passe est haché avant d'être stocké.
-//    * CP est récupéré depuis le token JWT pour sécurité.
-//    * @body password Nouveau mot de passe
-//    */
-//   @Patch('update-password')
-//   @ApiOperation({ summary: 'Modification du mot de passe utilisateur' })
-//   async updatePassword(
-//     @Body('mdp') mdp: string,
-//     @Headers('Authorization') authHeader: string
-//   ) {
-//     if (!mdp) throw new BadRequestException('Mot de passe requis');
-//     if (!authHeader) throw new UnauthorizedException('Token manquant');
-
-//     const token = authHeader.replace('Bearer ', '');
-//     const payload = this.authService.verifyToken(token);
-//     if (!payload) throw new UnauthorizedException('Token invalide');
-
-//     await this.authService.updatePassword(payload.sub, mdp);
-//     return { message: 'Mot de passe mis à jour avec succès.' };
-//   }
-// }
-
-// src/auth/auth.controller.ts
-
 import {
-  Controller,
-  Post,
-  Patch,
-  Body,
-  Param,
-  Headers,
-  NotFoundException,
-  BadRequestException,
-  UnauthorizedException
+  Controller,        // Décorateur pour définir un controller NestJS
+  Post,              // Décorateur pour route POST
+  Patch,             // Décorateur pour route PATCH
+  Body,              // Décorateur pour récupérer le corps de la requête
+  Req,               // Décorateur pour récupérer la requête entière
+  BadRequestException,   // Exception HTTP 400
+  UnauthorizedException,
+  UseGuards,
+  Get, // Exception HTTP 401
+  Res, // Pour manipuler la réponse HTTP
 } from '@nestjs/common';
-import { AuthService } from './auth.service.js';
-import { LoginDto } from './dto/login.dto.js';
-import { ApiTags, ApiOkResponse, ApiBadRequestResponse, ApiOperation } from '@nestjs/swagger';
 
-/**
- * Classe utilisée uniquement pour Swagger.
- * Elle décrit la structure de la réponse lors de la connexion.
- */
-class TokensResponse {
-  accessToken: string;
-  refreshToken?: string; // Non utilisé pour l'instant
-}
+import { AuthService } from './auth.service'; // Service auth (login, token, reset, etc.)
+import { UsersService } from '../users/users.service'; // Service utilisateurs
+import { Request, Response } from 'express';
+import { ApiTags, ApiOperation, ApiBody, ApiResponse } from '@nestjs/swagger';
+import { JwtAuthGuard } from './guards/jwt-auth.guard';
+import { GetUser } from './decorators/get-user.decorator';
 
-@ApiTags('auth') // Toutes les routes apparaîtront sous "auth" dans Swagger
-@Controller('auth')
+@ApiTags('auth') // Swagger : regroupe toutes les routes sous "auth"
+@Controller('auth') // Préfixe /auth pour toutes les routes
 export class AuthController {
-  constructor(private authService: AuthService) { }
+  constructor(
+    private readonly authService: AuthService,
+    private readonly usersService: UsersService,
+  ) {}
+
+  /**
+   * GET /auth/me
+   * Retourne les informations de l'utilisateur connecté.
+   * Nécessite cookie HttpOnly contenant le JWT.
+   */
+  @Get('me')
+  @ApiOperation({ summary: "Récupérer l'utilisateur connecté" })
+  @ApiResponse({ status: 200, description: 'Utilisateur récupéré' })
+  @ApiResponse({ status: 401, description: 'Utilisateur non connecté' })
+  async getMe(@Req() req: Request) {
+    const authHeader = req.headers['authorization'] || '';
+    let token: string | null = null;
+
+    // Si tu passes le token dans Authorization
+    if (authHeader.startsWith('Bearer ')) {
+      token = authHeader.split(' ')[1];
+    } else if (req.cookies && req.cookies.accessToken) {
+      // Si token via cookie HttpOnly
+      token = req.cookies.accessToken;
+    }
+
+    if (!token) {
+      throw new UnauthorizedException('Utilisateur non connecté');
+    }
+
+    const payload = this.authService.verifyToken(token);
+    if (!payload) {
+      throw new UnauthorizedException('Token invalide ou expiré');
+    }
+
+    // Récupère l'utilisateur depuis la base pour sécurité
+    const user = await this.usersService.findOne(payload.sub);
+    if (!user) {
+      throw new UnauthorizedException('Utilisateur introuvable');
+    }
+
+    return {
+      cp: user.cp,
+      email: user.email,
+      role: user.role,
+      acceptedTerms: user.accepteConditions,
+    };
+  }
 
   /**
    * POST /auth/login
-   * Authentifie un utilisateur via CP + mot de passe
-   * Retourne un JWT si les identifiants sont valides
+   * Connexion via CP + mot de passe
+   * Retourne { acceptedTerms } et pose le cookie HttpOnly
    */
   @Post('login')
-  @ApiOperation({ summary: 'Connexion utilisateur et récupération du token' })
-  @ApiOkResponse({
-    description: 'Connexion réussie, retourne access token.',
-    type: TokensResponse,
+  @ApiOperation({ summary: 'Connexion utilisateur' })
+  @ApiBody({
+    schema: {
+      type: 'object',
+      properties: {
+        cp: { type: 'string', example: '0123456A' },
+        mdp: { type: 'string', example: 'motdepasse' },
+      },
+      required: ['cp', 'mdp'],
+    },
   })
-  @ApiBadRequestResponse({
-    description: 'CP ou mot de passe invalide.',
-  })
-  async login(@Body() dto: LoginDto) {
-    // Validation simple côté contrôleur
-    if (!dto.cp || !dto.mdp) {
+  @ApiResponse({ status: 200, description: 'Connexion réussie' })
+  @ApiResponse({ status: 400, description: 'CP ou mot de passe manquant' })
+  @ApiResponse({ status: 401, description: 'Utilisateur non trouvé ou mot de passe invalide' })
+  async login(
+    @Body() body: { cp: string; mdp: string },
+    @Res({ passthrough: true }) res: Response,
+  ) {
+    const { cp, mdp } = body;
+
+    if (!cp || !mdp) {
       throw new BadRequestException('CP et mot de passe requis');
     }
 
-    // Appelle le service d'authentification
-    return this.authService.login(dto.cp, dto.mdp);
+    try {
+      const result = await this.authService.login(cp, mdp);
+      // Pose le cookie HttpOnly avec le token JWT
+      res.cookie('accessToken', result.accessToken, {
+        httpOnly: true,
+        secure: false,    // ⚠️ false en localhost
+        sameSite: 'lax',  // ⚠️ compatible localhost
+        path: '/',
+      });
+
+      return { acceptedTerms: result.acceptedTerms };
+    } catch (err) {
+      throw new UnauthorizedException(err.message);
+    }
   }
 
   /**
-   * POST /auth/token/:cp
-   * Génère un token pour un utilisateur spécifique (ex: onboarding)
-   * Retourne 404 si l’utilisateur n’existe pas
+   * PATCH /auth/terms
+   * Accepter les conditions d'utilisation
    */
-  @Post('token/:cp')
-  @ApiOperation({ summary: 'Génération d’un token pour un utilisateur' })
-  async generateToken(@Param('cp') cp: string) {
-    if (!cp) throw new BadRequestException('CP requis');
+@Patch('terms')
+@ApiOperation({ summary: "Accepter les conditions d'utilisation" })
+@ApiResponse({ status: 200, description: 'Conditions acceptées' })
+@ApiResponse({ status: 401, description: 'Token manquant ou invalide' })
+async acceptTerms(@Req() req: Request) {
+  let token: string | null = null;
 
-    const token = await this.authService.generateTokenForUser(cp);
-
-    // Si le service retourne null → aucun utilisateur trouvé
-    if (!token) throw new NotFoundException('Utilisateur non trouvé');
-
-    return token;
+  // Lecture depuis cookie
+  if (req.cookies && req.cookies.accessToken) {
+    token = req.cookies.accessToken;
   }
+
+  if (!token) {
+    throw new UnauthorizedException('Utilisateur non connecté');
+  }
+
+  const payload = this.authService.verifyToken(token);
+  if (!payload) {
+    throw new UnauthorizedException('Token invalide ou expiré');
+  }
+
+  // Marque les conditions comme acceptées
+  await this.authService.acceptTerms(payload.sub);
+  return { message: 'Conditions acceptées' };
+}
 
   /**
-   * PATCH /auth/update-password
-   * Met à jour le mot de passe d’un utilisateur connecté.
-   * Le CP n’est PAS envoyé dans le body → il est extrait du token JWT.
-   *
-   * Sécurité :
-   * - Récupère le header Authorization: Bearer xxx
-   * - Vérifie le JWT
-   * - Récupère le CP dans payload.sub
-   * - Hash le nouveau mot de passe dans le service
+   * POST /auth/reset-password
+   * Envoie un email pour réinitialiser le mot de passe
    */
-  @Patch('update-password')
-  @ApiOperation({ summary: 'Modification du mot de passe utilisateur' })
-  async updatePassword(
-    @Body('mdp') mdp: string,
-    @Headers('Authorization') authHeader: string
-  ) {
-    // Vérification du mot de passe
-    if (!mdp) {
-      throw new BadRequestException('Mot de passe requis');
-    }
-
-    // Vérification que le token est présent dans le header
-    if (!authHeader) {
-      throw new UnauthorizedException('Token manquant');
-    }
-
-    // Extraction du token sans "Bearer "
-    const token = authHeader.replace('Bearer ', '');
-
-    // Vérification + décodage du token
-    const payload = this.authService.verifyToken(token);
-    if (!payload) {
-      throw new UnauthorizedException('Token invalide');
-    }
-
-    // Mise à jour du mot de passe pour l'utilisateur identifié par le token (payload.sub)
-    await this.authService.updatePassword(payload.sub, mdp);
-
-    return { message: 'Mot de passe mis à jour avec succès.' };
-  }
-/**
- * POST /auth/reset-password
- * Réinitialisation du mot de passe pour un utilisateur donné.
- *
- */
   @Post('reset-password')
-  @ApiOperation({ summary: 'Réinitialisation du mot de passe utilisateur' })
-  async resetPassword(@Body('email') email: string) {
-    // Vérifie que le corps de la requête contient bien un email
-    if (!email) {
-      // Si l'email est manquant, renvoie une exception 400 Bad Request
-      throw new BadRequestException('Email requis');
-    }
+  @ApiOperation({ summary: 'Demande de réinitialisation du mot de passe' })
+  @ApiBody({
+    schema: {
+      type: 'object',
+      properties: { email: { type: 'string', example: 'test@example.com' } },
+      required: ['email'],
+    },
+  })
+  @ApiResponse({ status: 200, description: 'Email de réinitialisation envoyé' })
+  async resetPassword(@Body() body: { email: string }) {
+    const { email } = body;
+    if (!email) throw new BadRequestException('Email requis');
 
-    // Appelle le service d'authentification pour générer un token de réinitialisation
-    // et envoyer un email à l'utilisateur avec le lien de reset
     return this.authService.resetPassword(email);
   }
 
+  /**
+   * POST /auth/update-password
+   * Met à jour le mot de passe via token JWT
+   */
+@Patch('update-password')
+@ApiOperation({ summary: 'Mettre à jour le mot de passe' })
+@ApiBody({
+  schema: {
+    type: 'object',
+    properties: {
+      newPassword: { type: 'string', example: 'nouveauMdp' },
+    },
+    required: ['newPassword'],
+  },
+})
+async updatePassword(
+  @Req() req: Request,
+  @Body() body: { newPassword: string }
+) {
+  const authHeader = req.headers['authorization'] || '';
+  let token: string | null = null;
+
+  // Lecture du token depuis le header Authorization
+  if (authHeader.startsWith('Bearer ')) {
+    token = authHeader.split(' ')[1];
+  }
+
+  const { newPassword } = body;
+
+  if (!token) {
+    throw new UnauthorizedException('Token manquant');
+  }
+  if (!newPassword) {
+    throw new BadRequestException('Nouveau mot de passe requis');
+  }
+
+  const payload = this.authService.verifyToken(token);
+  if (!payload) {
+    throw new UnauthorizedException('Token invalide ou expiré');
+  }
+
+  // ✅ PASSER LE TOKEN COMPLET AU SERVICE
+  await this.authService.updatePassword(token, newPassword);
+
+  return { message: 'Mot de passe mis à jour avec succès' };
 }
 
 
+  /**
+ * POST /auth/logout
+ * Déconnexion de l'utilisateur
+ * Supprime le cookie HttpOnly contenant le JWT
+ */
+@Post('logout')
+@ApiOperation({ summary: 'Déconnexion utilisateur' })
+@ApiResponse({ status: 200, description: 'Utilisateur déconnecté' })
+async logout(@Res({ passthrough: true }) res: Response) {
+  // Supprime le cookie en le réinitialisant
+  res.clearCookie('accessToken', {
+    httpOnly: true,
+    secure: false, // false en local
+    sameSite: 'lax',
+    path: '/',
+  });
+
+  return { message: 'Utilisateur déconnecté' };
+}
+}

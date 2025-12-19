@@ -34,3 +34,6 @@ export class CreateUserDto {
   @IsOptional()
   authToken?: string | null; // Optionnel, peut être null
 }
+
+
+// 18/12 13:58

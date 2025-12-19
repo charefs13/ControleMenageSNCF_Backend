@@ -4,6 +4,6 @@ import { MailService } from './mail.service';
 
 @Module({
   providers: [MailService],
-  exports: [MailService], // ← très important pour qu’AuthModule puisse l’utiliser
+  exports: [MailService], 
 })
 export class MailModule {}
